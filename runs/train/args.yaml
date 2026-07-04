@@ -11,7 +11,7 @@ save_period: -1
 cache: false
 device: mps
 workers: 2
-project: runs_2
+project: runs
 name: null
 exist_ok: false
 pretrained: true
@@ -93,4 +93,4 @@ mixup: 0.0
 copy_paste: 0.0
 cfg: null
 tracker: botsort.yaml
-save_dir: runs_2/train
+save_dir: runs/train

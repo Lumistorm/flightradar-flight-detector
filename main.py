@@ -192,7 +192,7 @@ def train_model():
         epochs=100,
         imgsz=640,
         batch=16,
-        project="runs_2",
+        project="runs",
         workers=2,
         device='mps',
         patience=15,
@@ -207,7 +207,15 @@ def train_model():
 
 
 if __name__ == '__main__':
-    train_model()
+    # train_model()
+    model = YOLO("runs/train/weights/best.pt")
+
+    results = model.predict(
+        source="img.png",
+        conf=0.25,
+        save=True,
+        device = "mps"
+    )
     # generate_augmented_batch(400)
     # model = init_YOLO()
     #
