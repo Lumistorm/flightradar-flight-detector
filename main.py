@@ -1,17 +1,17 @@
-import webbrowser
+
 import pyautogui
-import time
-from mss import mss
+import os
 import numpy as np
+from mss import mss
+from webbrowser import open, get
 from ultralytics import YOLO
 from random import randint, uniform
 from PIL import Image, ImageDraw
-import os
-import pytesseract
-import cProfile
-import pstats
-import time
-import easyocr
+from pytesseract import image_to_data, Output
+from cProfile import Profile
+from pstats import Stats
+from time import sleep
+from numba import njit
 
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 
@@ -24,17 +24,93 @@ MAP_WIDTH = ((DISPLAY_WIDTH * 295) // 378) - 1
 MAP_HEIGHT = ((DISPLAY_HEIGHT * 861) // 982) - 1
 pyautogui.PAUSE = 0.0
 
+sct = mss()
+monitor = sct.monitors[1]
 
-def init_website():
+
+def init_website() -> None:
+    """
+    Opens Flightradar24 website on Chrome.
+
+    :return: None.
+    """
+
     url = 'https://www.flightradar24.com/45.24,-74.18/10'
-    webbrowser.open(url)
-    time.sleep(3)
+    chrome = get('chrome')
+    chrome.open(url, new=0)
+    sleep(3)
 
 
-def detect_aircraft(model, source, target_label):
+@njit
+def get_label_position(data, target: str):
+    """
+    return position of target label.
+
+    :param data: Predictions from tesseract.
+    :param target: Target label.
+    :return: The x and y of the target label.
+    """
+
+    for index in range(len(data['text'])):
+        text = data['text'][index].strip()
+
+        if text.upper() == target.upper():
+            text_x = data['left'][index]
+            text_y = data['top'][index]
+
+            return text_x, text_y
+    else:
+        raise 'Aircraft not detected'
+
+
+@njit
+def get_closest_box(boxes, x, y):
+    """
+    Return the closest box to target.
+
+    :param boxes: List of boxes from YOLO.
+    :param x: Target x.
+    :param y: Target y.
+    :return: The x and y of the closest box.
+    """
+
+    closest_distance = 1e18
+    closest_x = 0
+    closest_y = 0
+
+    for index in range(len(boxes)):
+        x_center = boxes[index, 0]
+        y_center = boxes[index, 1]
+        width = boxes[index, 2]
+
+        # get middle right position
+        right_x = x_center + width * 0.5
+
+        # get distance to target label
+        dx = right_x - x
+        dy = y_center - y
+        distance_squared = dx * dx + dy * dy
+
+        if distance_squared < closest_distance:
+            closest_distance = distance_squared
+            closest_x = x_center
+            closest_y = y_center
+
+    return closest_x, closest_y
+
+
+def detect_aircraft(model, source: np.ndarray, target_label: str) -> None:
+    """
+    Clicks on the target aircraft.
+
+    :param model: YOLO model.
+    :param source: Numpy array of an image.
+    :param target_label: Label of target aircraft.
+    :return: None.
+    """
+
     # predict aircraft locations
-    start_time = time.perf_counter()
-    results = model.predict(
+    prediction = model.predict(
         source=source,
         conf=0.25,
         device="mps",
@@ -42,61 +118,47 @@ def detect_aircraft(model, source, target_label):
         verbose=False,
         save=False
     )
-    print('yolo: ', time.perf_counter() - start_time)
-    r = results[0]
+    r = prediction[0]
 
     # source dimensions
     source_height, source_width = r.orig_shape
 
     # predict text locations
-    start_time = time.perf_counter()
-    text_data = pytesseract.image_to_data(source, output_type=pytesseract.Output.DICT)
-    print('tesseract: ', time.perf_counter() - start_time)
+    text_data = image_to_data(source, output_type=Output.DICT)
 
     # get label normalized position and dimensions
-    for index in range(len(text_data['text'])):
-        text = text_data['text'][index].strip()
-        print(text)
-
-        if text.upper() == target_label.upper():
-            text_x = text_data['left'][index]
-            text_y = text_data['top'][index]
-
-            break
-    else:
-        return
+    text_x, text_y = get_label_position(data=text_data, target=target_label)
 
     # set to large number
-    closest_distance = 1_000_000_000
-    closest_center_x = 0
-    closest_center_y = 0
+    closest_x, closest_y = get_closest_box(bpxes=r.boxes, x=text_x, y=text_y)
 
-    # find the closest aircraft to target label
-    for x_center, y_center, width, height in r.boxes.xywh:
-        # get middle left position
-        x = x_center + width * 0.5
-
-        # get distance to target label
-        dx = float(x - text_x)
-        dy = float(y_center - text_y)
-        distance_squared = dx * dx + dy * dy
-        if distance_squared < closest_distance:
-            closest_distance = distance_squared
-            closest_center_x = x_center
-            closest_center_y = y_center
-    print(closest_center_x, closest_center_y)
-
-    pyautogui.moveTo(closest_center_x / source_width * DISPLAY_WIDTH, closest_center_y / source_height * DISPLAY_HEIGHT)
+    # click on aircraft
+    pyautogui.moveTo(
+        closest_x / source_width * DISPLAY_WIDTH,
+        closest_y / source_height * DISPLAY_HEIGHT
+    )
     pyautogui.mouseDown(button='left')
     pyautogui.mouseUp(button='left')
-    # time.sleep(2)
+
+    # close menu
+    # sleep(2)
     # pyautogui.moveTo(336, 155)
     # pyautogui.mouseDown(button='left')
     # pyautogui.mouseUp(button='left')
-    # time.sleep(1)
+    # sleep(1)
 
 
-def scan_map(x_range, y_range, model, target_label):
+def scan_map(x_range: int, y_range: int, model, target_label: str) -> None:
+    """
+    Scan the map to detect aircraft.
+
+    :param x_range: Range of x scans.
+    :param y_range: Range of y scans.
+    :param model: YOLO model.
+    :param target_label: Label of target aircraft.
+    :return: None.
+    """
+
     direction = 1
     for y in range(y_range):
         for x in range(x_range):
@@ -116,9 +178,9 @@ def scan_map(x_range, y_range, model, target_label):
             if x < x_range - 1:
                 pyautogui.mouseDown(button='left')
                 pyautogui.move(-direction * MAP_WIDTH, 0, duration=1.5)
-                time.sleep(0.1)
+                sleep(0.1)
                 pyautogui.mouseUp(button='left')
-                time.sleep(0.2)
+                sleep(0.2)
 
         if y < y_range - 1:
             # reset mouse position
@@ -127,49 +189,67 @@ def scan_map(x_range, y_range, model, target_label):
             # drag down
             pyautogui.mouseDown(button='left')
             pyautogui.move(0, -MAP_HEIGHT, duration=1.5)
-            time.sleep(0.1)
+            sleep(0.1)
             pyautogui.mouseUp(button='left')
-            time.sleep(0.2)
+            sleep(0.2)
 
             direction *= -1
 
 
-def get_screenshot():
-    with mss() as sct:
-        monitor = sct.monitors[1]
-        screenshot = sct.grab(monitor)
+def get_screenshot() -> np.ndarray:
+    """
+    Get screenshot of display as numpy.ndarray.
 
-        # convert image to BGR array
-        img_array = np.array(screenshot)[..., :3]
+    :return: None.
+    """
+
+    screenshot = sct.grab(monitor)
+
+    # convert image to BGR array
+    img_array = np.array(screenshot)[..., :3]
 
     return img_array
 
 
-def generate_augmented_batch(batch_size):
-    # define paths
-    inputs_path = 'dataset/val/images'
-    debug_path = 'dataset/val/debug_inputs'
-    labels_path = 'dataset/val/labels'
+def generate_augmented_images(
+        amount: int, *, inputs_path: str, debug_path: str, labels_path: str, save_debug=True
+) -> None:
+    """
+    Generate and save augmented image for model training.
+
+    :param amount: amount of images to generate.
+    :param inputs_path: Path to save input images.
+    :param debug_path: Path to save debug images.
+    :param labels_path: Path to save labels.
+    :param save_debug: Whether to save debug images.
+    :return: None.
+    """
+
+    # create paths
     os.makedirs(inputs_path, exist_ok=True)
     os.makedirs(debug_path, exist_ok=True)
     os.makedirs(labels_path, exist_ok=True)
 
     # load images
+    num_aircraft = 31
+    num_backgrounds = 200
+
     backgrounds = [
         Image.open(f'map_backgrounds/map_background_{i}.png').convert('RGBA')
-        for i in range(200)
+        for i in range(num_backgrounds)
     ]
+    background_width, background_height = backgrounds[0].size
 
     aircraft = [
         Image.open(f'yellow_aircraft/aircraft_{i}.png').convert('RGBA')
-        for i in range(31)
+        for i in range(num_aircraft)
     ]
 
     count = 1
-    for index in range(batch_size):
+    for index in range(amount):
         labels = []
 
-        background_img = backgrounds[randint(0, 199)].copy()
+        background_img = backgrounds[randint(0, num_backgrounds - 1)].copy()
         debug_img = background_img.copy()
 
         # 10 % of data without target
@@ -191,7 +271,7 @@ def generate_augmented_batch(batch_size):
 
             # loop for random num planes
             for _ in range(num_planes):
-                aircraft_img = aircraft[randint(0, 30)].copy()
+                aircraft_img = aircraft[randint(0, num_aircraft - 1)].copy()
                 aircraft_width, aircraft_height = aircraft_img.size
 
                 # resize
@@ -206,7 +286,6 @@ def generate_augmented_batch(batch_size):
                 # get tight rect box
                 box_x1, box_y1, box_x2, box_y2 = aircraft_img.getbbox()
 
-                background_width, background_height = background_img.size
                 aircraft_width, aircraft_height = aircraft_img.size
 
                 # offscreen threshold
@@ -217,7 +296,6 @@ def generate_augmented_batch(batch_size):
                 random_y = randint(-max_offscreen_y, background_height - max_offscreen_y)
 
                 background_img.paste(aircraft_img, (random_x, random_y), aircraft_img)
-                debug_img.paste(aircraft_img, (random_x, random_y), aircraft_img)
 
                 # bounding box coordinates
                 box_x1 += random_x
@@ -240,25 +318,34 @@ def generate_augmented_batch(batch_size):
                 yolo_height = box_height / background_height
                 labels.append(f"{0} {x_center:.6f} {y_center:.6f} {yolo_width:.6f} {yolo_height:.6f}")
 
-                # draw bounding box
-                box_corners = [box_x1, box_y1, box_x2, box_y2]
-                draw.rectangle(box_corners, outline='red', width=2)
+                # draw debug
+                if save_debug:
+                    box_corners = [box_x1, box_y1, box_x2, box_y2]
+                    draw.rectangle(box_corners, outline='red', width=2)
+                    debug_img.paste(aircraft_img, (random_x, random_y), aircraft_img)
 
-        # save
+        # save images
         background_img = background_img.convert('RGB')
-        debug_img = debug_img.convert('RGB')
-
         background_img.save(f'{inputs_path}/image_{index}.png')
-        debug_img.save(f'{debug_path}/image_{index}.png')
 
         with open(f'{labels_path}/image_{index}.txt', 'w') as f:
             f.write('\n'.join(labels))
 
-        print(f'Done {count} / {batch_size}')
+        if save_debug:
+            debug_img = debug_img.convert('RGB')
+            debug_img.save(f'{debug_path}/image_{index}.png')
+
+        print(f'Done {count} / {amount}')
         count += 1
 
 
-def train_model():
+def train_model() -> None:
+    """
+    Train and save YOLO model.
+
+    :return: None.
+    """
+
     model = YOLO('yolov8n.pt')
 
     model.train(
@@ -280,37 +367,47 @@ def train_model():
     )
 
 
-def main():
-    # train_model()
+def main() -> None:
+    # -------------------------
+    # Train Yolo Model
+    # -------------------------
 
-    # generate_augmented_batch(400)
-    # model = init_YOLO()
-    #
+    do_generate_dataset = False
+    do_train_model = False
 
-    # while True:
-    #     print(pyautogui.position())
-    #     time.sleep(3)
+    if do_generate_dataset:
+        generate_augmented_images(
+            400,
+            inputs_path='dataset/val/images',
+            debug_path='dataset/val/debug_inputs',
+            labels_path='dataset/val/labels',
+            save_debug=True,
+        )
+    if do_train_model:
+        train_model()
+
+    # -------------------------
+    # Find aircraft
+    # -------------------------
     init_website()
 
     # init models
     dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-
     model = YOLO('runs/train/weights/best.mlmodel')
     model.predict(dummy)
+    image_to_data(dummy)
 
-    pytesseract.image_to_data(dummy)
-
-    scan_map(1, 1, model, 'ACA808')
+    scan_map(2, 2, model, 'ACA808')
 
 
 if __name__ == '__main__':
-    profiler = cProfile.Profile()
+    # profile code
+    profiler = Profile()
     profiler.enable()
 
     main()
 
     profiler.disable()
 
-    results = pstats.Stats(profiler).sort_stats('cumtime')
+    results = Stats(profiler).sort_stats('cumtime')
     results.print_stats(20)
-
