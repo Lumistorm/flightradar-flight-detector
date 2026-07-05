@@ -7,38 +7,112 @@ from ultralytics import YOLO
 from random import randint, uniform
 from PIL import Image, ImageDraw
 import os
-
+import pytesseract
+import cProfile
+import pstats
+import time
+import easyocr
 
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 
 
 DISPLAY_SIZE = pyautogui.size()
-MAP_WIDTH = ((DISPLAY_SIZE.width * 295) // 378) - 1
-MAP_HEIGHT = ((DISPLAY_SIZE.height * 861) // 982) - 1
+DISPLAY_WIDTH = DISPLAY_SIZE.width
+DISPLAY_HEIGHT = DISPLAY_SIZE.height
+
+MAP_WIDTH = ((DISPLAY_WIDTH * 295) // 378) - 1
+MAP_HEIGHT = ((DISPLAY_HEIGHT * 861) // 982) - 1
 pyautogui.PAUSE = 0.0
 
 
 def init_website():
-    url = 'https://www.flightradar24.com/45,-75/8'
+    url = 'https://www.flightradar24.com/45.24,-74.18/10'
     webbrowser.open(url)
     time.sleep(3)
 
 
-def scan_map(x_range, y_range):
+def detect_aircraft(model, source, target_label):
+    # predict aircraft locations
+    start_time = time.perf_counter()
+    results = model.predict(
+        source=source,
+        conf=0.25,
+        device="mps",
+        imgsz=640,
+        verbose=False,
+        save=False
+    )
+    print('yolo: ', time.perf_counter() - start_time)
+    r = results[0]
+
+    # source dimensions
+    source_height, source_width = r.orig_shape
+
+    # predict text locations
+    start_time = time.perf_counter()
+    text_data = pytesseract.image_to_data(source, output_type=pytesseract.Output.DICT)
+    print('tesseract: ', time.perf_counter() - start_time)
+
+    # get label normalized position and dimensions
+    for index in range(len(text_data['text'])):
+        text = text_data['text'][index].strip()
+        print(text)
+
+        if text.upper() == target_label.upper():
+            text_x = text_data['left'][index]
+            text_y = text_data['top'][index]
+
+            break
+    else:
+        return
+
+    # set to large number
+    closest_distance = 1_000_000_000
+    closest_center_x = 0
+    closest_center_y = 0
+
+    # find the closest aircraft to target label
+    for x_center, y_center, width, height in r.boxes.xywh:
+        # get middle left position
+        x = x_center + width * 0.5
+
+        # get distance to target label
+        dx = float(x - text_x)
+        dy = float(y_center - text_y)
+        distance_squared = dx * dx + dy * dy
+        if distance_squared < closest_distance:
+            closest_distance = distance_squared
+            closest_center_x = x_center
+            closest_center_y = y_center
+    print(closest_center_x, closest_center_y)
+
+    pyautogui.moveTo(closest_center_x / source_width * DISPLAY_WIDTH, closest_center_y / source_height * DISPLAY_HEIGHT)
+    pyautogui.mouseDown(button='left')
+    pyautogui.mouseUp(button='left')
+    # time.sleep(2)
+    # pyautogui.moveTo(336, 155)
+    # pyautogui.mouseDown(button='left')
+    # pyautogui.mouseUp(button='left')
+    # time.sleep(1)
+
+
+def scan_map(x_range, y_range, model, target_label):
     direction = 1
     for y in range(y_range):
         for x in range(x_range):
             # reset mouse position
             if direction == 1:
-                pyautogui.moveTo(MAP_WIDTH, DISPLAY_SIZE.height // 2)
+                pyautogui.moveTo(MAP_WIDTH, DISPLAY_HEIGHT // 2)
             else:
-                pyautogui.moveTo(1, DISPLAY_SIZE.height // 2)
+                pyautogui.moveTo(1, DISPLAY_HEIGHT // 2)
 
             # take screenshot
             img_array = get_screenshot()
 
             # ########## process image ##########
+            detect_aircraft(model=model, source=img_array, target_label=target_label)
 
+            # drag map to next location
             if x < x_range - 1:
                 pyautogui.mouseDown(button='left')
                 pyautogui.move(-direction * MAP_WIDTH, 0, duration=1.5)
@@ -48,7 +122,7 @@ def scan_map(x_range, y_range):
 
         if y < y_range - 1:
             # reset mouse position
-            pyautogui.moveTo(MAP_WIDTH // 2, DISPLAY_SIZE.height - 1)
+            pyautogui.moveTo(MAP_WIDTH // 2, DISPLAY_HEIGHT - 1)
 
             # drag down
             pyautogui.mouseDown(button='left')
@@ -206,19 +280,37 @@ def train_model():
     )
 
 
-if __name__ == '__main__':
+def main():
     # train_model()
-    model = YOLO("runs/train/weights/best.pt")
 
-    results = model.predict(
-        source="img.png",
-        conf=0.25,
-        save=True,
-        device = "mps"
-    )
     # generate_augmented_batch(400)
     # model = init_YOLO()
     #
-    # init_website()
-    # scan_map(15, 15, model)
+
+    # while True:
+    #     print(pyautogui.position())
+    #     time.sleep(3)
+    init_website()
+
+    # init models
+    dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+
+    model = YOLO('runs/train/weights/best.mlmodel')
+    model.predict(dummy)
+
+    pytesseract.image_to_data(dummy)
+
+    scan_map(1, 1, model, 'ACA808')
+
+
+if __name__ == '__main__':
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    main()
+
+    profiler.disable()
+
+    results = pstats.Stats(profiler).sort_stats('cumtime')
+    results.print_stats(20)
 
