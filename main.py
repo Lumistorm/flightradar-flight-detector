@@ -2,8 +2,9 @@
 import pyautogui
 import os
 import numpy as np
+import logging
+import webbrowser
 from mss import mss
-from webbrowser import open, get
 from ultralytics import YOLO
 from random import randint, uniform
 from PIL import Image, ImageDraw
@@ -15,6 +16,9 @@ from numba import njit
 
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 
+# -------------------------
+# Dimensions and display
+# -------------------------
 
 DISPLAY_SIZE = pyautogui.size()
 DISPLAY_WIDTH = DISPLAY_SIZE.width
@@ -27,8 +31,19 @@ pyautogui.PAUSE = 0.0
 sct = mss()
 monitor = sct.monitors[1]
 
+# -------------------------
+# Initialize Logger
+# -------------------------
 
-def init_website() -> None:
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s : %(message)s'
+)
+
+logger = logging.getLogger()
+
+
+def init_website():
     """
     Opens Flightradar24 website on Chrome.
 
@@ -36,13 +51,13 @@ def init_website() -> None:
     """
 
     url = 'https://www.flightradar24.com/45.24,-74.18/10'
-    chrome = get('chrome')
-    chrome.open(url, new=0)
+
+    webbrowser.open(url)
     sleep(3)
 
 
 @njit
-def get_label_position(data, target: str):
+def get_label_position(texts, lefts, tops, target: str):
     """
     return position of target label.
 
@@ -51,19 +66,19 @@ def get_label_position(data, target: str):
     :return: The x and y of the target label.
     """
 
-    for index in range(len(data['text'])):
-        text = data['text'][index].strip()
+    for index in range(len(texts)):
+        text = texts[index].strip()
 
         if text.upper() == target.upper():
-            text_x = data['left'][index]
-            text_y = data['top'][index]
+            text_x = lefts[index]
+            text_y = tops[index]
 
             return text_x, text_y
     else:
-        raise 'Aircraft not detected'
+        return None, None
 
 
-@njit
+# @njit
 def get_closest_box(boxes, x, y):
     """
     Return the closest box to target.
@@ -78,10 +93,8 @@ def get_closest_box(boxes, x, y):
     closest_x = 0
     closest_y = 0
 
-    for index in range(len(boxes)):
-        x_center = boxes[index, 0]
-        y_center = boxes[index, 1]
-        width = boxes[index, 2]
+    for box in boxes:
+        x_center, y_center, width, height = box
 
         # get middle right position
         right_x = x_center + width * 0.5
@@ -95,6 +108,7 @@ def get_closest_box(boxes, x, y):
             closest_distance = distance_squared
             closest_x = x_center
             closest_y = y_center
+        print(x_center, y_center)
 
     return closest_x, closest_y
 
@@ -127,16 +141,27 @@ def detect_aircraft(model, source: np.ndarray, target_label: str) -> None:
     text_data = image_to_data(source, output_type=Output.DICT)
 
     # get label normalized position and dimensions
-    text_x, text_y = get_label_position(data=text_data, target=target_label)
+    text_x, text_y = get_label_position(
+        texts=text_data['text'],
+        lefts=text_data['left'],
+        tops=text_data['top'],
+        target=target_label,
+    )
+
+    if text_x is None:
+        logger.info('Aircraft not detected')
+        return
 
     # set to large number
-    closest_x, closest_y = get_closest_box(bpxes=r.boxes, x=text_x, y=text_y)
+    xywh = r.boxes.xywh.cpu().numpy()
+    closest_x, closest_y = get_closest_box(boxes=xywh, x=text_x, y=text_y)
 
     # click on aircraft
     pyautogui.moveTo(
         closest_x / source_width * DISPLAY_WIDTH,
         closest_y / source_height * DISPLAY_HEIGHT
     )
+    print(closest_x / source_width * DISPLAY_WIDTH, closest_y / source_height * DISPLAY_HEIGHT)
     pyautogui.mouseDown(button='left')
     pyautogui.mouseUp(button='left')
 
@@ -335,7 +360,7 @@ def generate_augmented_images(
             debug_img = debug_img.convert('RGB')
             debug_img.save(f'{debug_path}/image_{index}.png')
 
-        print(f'Done {count} / {amount}')
+        logger.info(f'Done {count} / {amount}')
         count += 1
 
 
@@ -368,6 +393,7 @@ def train_model() -> None:
 
 
 def main() -> None:
+
     # -------------------------
     # Train Yolo Model
     # -------------------------
@@ -392,12 +418,24 @@ def main() -> None:
     init_website()
 
     # init models
+    logger.info('Initializing YOLO and tesseract models')
     dummy = np.zeros((640, 640, 3), dtype=np.uint8)
     model = YOLO('runs/train/weights/best.mlmodel')
     model.predict(dummy)
     image_to_data(dummy)
+    logger.info('Finished initializing models')
 
-    scan_map(2, 2, model, 'ACA808')
+    logger.info('Running aircraft detection (type \'q\' to quit).')
+    pyautogui.hotkey('command', 'tab')
+    sleep(0.1)
+
+    while True:
+        target_label = input('Enter target label: ')
+        if target_label.lower() in ('q', 'quit', ''):
+            break
+
+        pyautogui.hotkey('command', 'tab')
+        scan_map(1, 1, model, target_label)
 
 
 if __name__ == '__main__':
